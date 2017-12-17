@@ -87,12 +87,10 @@ func initMirrorRsp(rsp http.ResponseWriter) {
 
 func getStaticResource(rsp http.ResponseWriter, req *http.Request) {
     initMirrorRsp(rsp)
-    fmt.Println("path", req.URL.Path)
     path := filepath.Clean(strings.ToLower(req.URL.Path))
     if !strings.HasPrefix(path, "/static/") {
         path = "/static/index.html"
     }
-    fmt.Println("path", path[1:])
     contentType := "text/html"
     if strings.HasSuffix(path, ".css") {
         contentType = "text/css"
@@ -127,7 +125,6 @@ func rewriteProxyBody(rsp *http.Response) (err error) {
     b = bytes.Replace(b, []byte("google.com"), []byte("recaptcha.net"), -1) // replace html
     body := ioutil.NopCloser(bytes.NewReader(b))
     rsp.Body = body
-    fmt.Println(body)
     rsp.ContentLength = int64(len(b))
     rsp.Header.Set("Content-Length", strconv.Itoa(len(b)))
     rsp.Header.Set("Server", "MailHide-Mirror")
