@@ -1,0 +1,6 @@
+{
+    "RC_secret": "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe",
+    "RC_key": "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI",
+    "RedisHost": "127.0.0.1:6379",
+    "ListenAddress": "127.0.0.1:8080"
+}
