@@ -5,25 +5,23 @@ import (
     "io/ioutil"
     "net/url"
     "net/http"
-    "net/http/httputil"
     "path/filepath"
     "encoding/json"
     "math/rand"
     "strings"
-    "strconv"
     "regexp"
-    "log"
-    "bytes"
     "time"
+    "log"
     "os"
-    "github.com/garyburd/redigo/redis"
+    "google.golang.org/appengine"
+    "google.golang.org/appengine/datastore"
+    "google.golang.org/appengine/urlfetch"
 )
 
 type Configuration struct {
     RC_secret     string
     RC_key        string
-    RedisHost     string
-    ListenAddress string
+    DS_kind       string
 }
 
 type recaptchaResponse struct {
@@ -31,6 +29,12 @@ type recaptchaResponse struct {
     ErrorCodes []string `json:"error-codes"`
 }
 
+type Email struct {
+    Address     string
+    CreatedAt   time.Time
+}
+
+/*
 var _redis redis.Conn
 
 func redisConnect() {
@@ -40,6 +44,7 @@ func redisConnect() {
         panic(err)
     }
 }
+*/
 
 var _configuration = Configuration{}
 
@@ -82,7 +87,7 @@ func randStr(n int) string {
 var email_re = regexp.MustCompile(`^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,4}$`)
 
 func initMirrorRsp(rsp http.ResponseWriter) {
-    rsp.Header().Add("Server", "MailHide-Mirror")
+    // rsp.Header().Add("Server", "MailHide-Mirror") // useless for Google Frontend
 }
 
 func getStaticResource(rsp http.ResponseWriter, req *http.Request) {
@@ -101,6 +106,7 @@ func getStaticResource(rsp http.ResponseWriter, req *http.Request) {
     if err != nil {
         content, err = ioutil.ReadFile("static/404.html")
         if err != nil {
+            fmt.Fprintf(rsp, "Error")
             rsp.WriteHeader(500)
             return
         }
@@ -113,6 +119,7 @@ func getStaticResource(rsp http.ResponseWriter, req *http.Request) {
 }
 
 // Deprecated due to recaptcha referer check policy
+/*
 func rewriteProxyBody(rsp *http.Response) (err error) {
     b, err := ioutil.ReadAll(rsp.Body) //Read html
     if err != nil {
@@ -131,7 +138,6 @@ func rewriteProxyBody(rsp *http.Response) (err error) {
     return nil
 }
 
-// Deprecated due to recaptcha referer check policy
 func getMirroredEmail(rsp http.ResponseWriter, req *http.Request) {
     req.Host = "recaptcha.net"
     target, _ := url.Parse("https://recaptcha.net")
@@ -140,14 +146,17 @@ func getMirroredEmail(rsp http.ResponseWriter, req *http.Request) {
     pxy.ModifyResponse = rewriteProxyBody
     pxy.ServeHTTP(rsp, req)
 }
+*/
 
 func viewEmail(rsp http.ResponseWriter, req *http.Request) {
+    ctx := appengine.NewContext(req)
     initMirrorRsp(rsp)
-    key := req.FormValue("key")
+    k := req.FormValue("key")
+    key := datastore.NewKey(ctx, _configuration.DS_kind, k, 0, nil)
     if req.Method == "POST" { // View Result
         // Check reCAPTCHA
         recaptcha := req.FormValue("g-recaptcha-response")
-        client := &http.Client{Timeout: 5 * time.Second}
+        client := urlfetch.Client(ctx)
         resp, err := client.PostForm("https://www.google.com/recaptcha/api/siteverify",
             url.Values{"secret": {_configuration.RC_secret}, "response": {recaptcha}})
         if err != nil {
@@ -179,22 +188,24 @@ func viewEmail(rsp http.ResponseWriter, req *http.Request) {
 
         content, err := ioutil.ReadFile("static/result.html")
         if err != nil {
+            fmt.Fprintf(rsp, "Error")
             rsp.WriteHeader(500)
             return
         }
-        email, err := redis.String(_redis.Do("GET", "mailhide_" + key))
-        if err != nil {
+        email := new(Email)
+        if err = datastore.Get(ctx, key, email); err != nil {
             rsp.WriteHeader(404)
             fmt.Fprintln(rsp, "Not found")
             return
         }
-        fmt.Fprintln(rsp, strings.Replace(string(content), "RSP_EMAIL", email, 2))
+        fmt.Fprintln(rsp, strings.Replace(string(content), "RSP_EMAIL", email.Address, 2))
         return
 
     }
     // Verification Page
     content, err := ioutil.ReadFile("static/show.html")
     if err != nil {
+        fmt.Fprintf(rsp, "Error")
         rsp.WriteHeader(500)
         return
     }
@@ -202,51 +213,56 @@ func viewEmail(rsp http.ResponseWriter, req *http.Request) {
 }
 
 func saveEmail(rsp http.ResponseWriter, req *http.Request) {
+    ctx := appengine.NewContext(req)
     initMirrorRsp(rsp)
-    email := req.FormValue("email")
-    if !email_re.MatchString(email) {
+    addr := req.FormValue("email")
+    if !email_re.MatchString(addr) {
         rsp.WriteHeader(400)
         return
     }
-    key, err := redis.String(_redis.Do("GET", "mailhide_" + email))
-
-    if err != nil {
-        key = randStr(16)
-        _, err = _redis.Do("SET", "mailhide_" + key, email)
-        if err != nil {
-            rsp.WriteHeader(500)
-            return
-        }
-        _, err = _redis.Do("SET", "mailhide_" + email, key)
-        if err != nil {
-            rsp.WriteHeader(500)
-            return
-        }
+    email := Email{
+        Address:   addr,
+        CreatedAt: time.Now(),
     }
-    content, err := ioutil.ReadFile("static/save.html")
+    query := datastore.NewQuery(_configuration.DS_kind).Filter("Address =", addr)
+    t := query.Run(ctx)
+    var empty Email
+    key, err := t.Next(&empty)
+    if err == datastore.Done {
+        k := randStr(16)
+        key = datastore.NewKey(ctx, _configuration.DS_kind, k, 0, nil)
+	for err = datastore.Get(ctx, key, &empty); err == nil ; {
+	    k = randStr(16)
+            key = datastore.NewKey(ctx, _configuration.DS_kind, k, 0, nil)
+	}
+        _, err = datastore.Put(ctx, key, &email)
+    }
     if err != nil {
+        fmt.Fprintf(rsp, "Error")
         rsp.WriteHeader(500)
         return
     }
-    output := strings.Replace(string(content), "RSP_EMAIL", email, 1)
-    output = strings.Replace(output, "RSP_KEY", key, 5)
-    output = strings.Replace(output, "RSP_EMAIL_FIRST_LETTER", email[0:1], 2)
-    output = strings.Replace(output, "RSP_EMAIL_DOMAIN", strings.Split(email, "@")[1], 2)
+    content, err := ioutil.ReadFile("static/save.html")
+    if err != nil {
+        fmt.Fprintf(rsp, "Error")
+        rsp.WriteHeader(500)
+        return
+    }
+    output := strings.Replace(string(content), "RSP_EMAIL", addr, 1)
+    output = strings.Replace(output, "RSP_KEY", key.StringID(), 5)
+    output = strings.Replace(output, "RSP_EMAIL_FIRST_LETTER", addr[0:1], 2)
+    output = strings.Replace(output, "RSP_EMAIL_DOMAIN", strings.Split(addr, "@")[1], 2)
     fmt.Fprintln(rsp, output)
 }
 
-func main() {
+func init() {
     rand.Seed(time.Now().UnixNano())
     readConfig()
-    redisConnect()
     http.HandleFunc("/", getStaticResource)
     http.HandleFunc("/d", viewEmail)
     http.HandleFunc("/save", saveEmail)
+    log.Println("Initialization completed")
     //http.HandleFunc("/d", getMirroredEmail)
     //http.HandleFunc("/recaptcha/", getMirroredEmail)
     // http.HandleFunc("/static/", getStaticResource)
-    err := http.ListenAndServe(_configuration.ListenAddress, nil)
-    if err != nil {
-        log.Fatal("ListenAndServe: ", err)
-    }
 }
